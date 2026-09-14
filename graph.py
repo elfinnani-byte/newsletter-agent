@@ -1,3 +1,4 @@
+import json, pathlib
 import json
 import trafilatura
 from langgraph.types import Send
@@ -232,5 +233,20 @@ INIT = {"hours": 24,
          "collected": [], "picked": [], "drafted": [], "verified": [], "log": []}
 
 
-def run():
-    return build().compile().invoke(INIT)
+def run():                                     # 돌리고, 한 줄 남긴다
+    out = build().compile().invoke(INIT)
+    row = {"run_id":    datetime.now().strftime("%Y-%m-%d %H:%M"),
+           "collected": len(out["collected"]),
+           "picked":    len(out["picked"]),
+           "drafted":   len(out["drafted"]),
+           "published": len(out["verified"]),
+           "hours":     out["hours"],
+           "by_source": {},
+           "log":       out["log"]}
+    for a in out["verified"]:
+        row["by_source"][a["source"]] = row["by_source"].get(a["source"], 0) + 1
+    path = pathlib.Path("store/metrics.jsonl")
+    path.parent.mkdir(exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return out

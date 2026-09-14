@@ -1,5 +1,8 @@
 name: 매일 브리핑
 
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: "30 22 * * *"       # UTC 22:30 = KST 07:30
@@ -30,3 +33,11 @@ jobs:
           OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TZ: Asia/Seoul
+
+      - name: 기록 커밋
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name  "newsroom-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add store/
+          git diff --cached --quiet || (git commit -m "metrics: $(date +%F)" && git push)
