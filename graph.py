@@ -1,3 +1,4 @@
+from typing import Literal
 import json, pathlib
 import json
 import trafilatura
@@ -17,6 +18,7 @@ from langgraph.graph import StateGraph, START, END
 class Brief(TypedDict):
     hours: int                              # 수집 시간 창(시간)
     collected: list                         # ① 수집한 기사
+    dead: list                              # ① 응답 없었던 소스
     picked: list                            # ② 선별해 남긴 다섯 건
     drafted: Annotated[list, operator.add]  # ③ 취재한 초안 — 워커들이 나눠 채운다
     verified: list                          # ④ 검수를 통과한 것
@@ -61,7 +63,7 @@ def collect(s: dict) -> dict:   # ① 자료 수집 — 빈 노드를 갈아 끼
             seen.add(key)
             items.append({"title": e.title, "url": e.link, "source": name, "at": at,
                           "summary": strip_tags(e.get("summary", ""))[:300]})
-    return {"collected": items,
+    return {"collected": items, "dead": dead,
             "log": [f"① 수집   {s['hours']}시간 창 · {len(items)}건"
                     + (f" · 응답 없음 {dead}" if dead else "")]}
 
@@ -101,16 +103,28 @@ def select(s: dict) -> dict:                   # ② 중요도 선별 — 빈 �
         chunk = items[i:i + BATCH]
         survivors += [chunk[p.index] for p in ask_picks(chunk, 8)]
     finals = ask_picks(survivors, TARGET)       # 본선 — 한 화면에 놓고 다섯 건
-    return {"picked": [survivors[p.index] for p in finals],
-            "log": [f"② 선별   {len(items)} → 예선 {len(survivors)} → {len(finals)}건"]}
 
-class Draft(BaseModel):        # 섹션에서 정한 세 칸
+    picked, seen_events, dupes = [], set(), 0
+    for p in finals:
+        if p.event in seen_events:
+            dupes += 1
+            continue
+        seen_events.add(p.event)
+        picked.append({**survivors[p.index], "event": p.event})
+
+    return {"picked": picked,
+            "log": [f"② 선별   {len(items)} → 예선 {len(survivors)} → {len(finals)}건"
+                    + (f" · 중복사건 제외 {dupes}건" if dupes else "")]}
+
+class Draft(BaseModel):        # 섹션에서 정한 세 칸 + 주제 분류
     headline: str = Field(description="20자 내외의 한국어 헤드라인")
     summary:  str = Field(description="세 문장 요약. ~합니다체, 과장 없이 건조하게")
     why:      str = Field(description="국내 개발팀에게 왜 중요한지 한 문장")
+    topic: Literal["모델·API", "도구·프레임워크", "정책·규제", "사례·적용", "연구"] = \
+        Field(description="다섯 카테고리 중 가장 가까운 것 하나")
 
 REPORT_SYS = ("당신은 국내 개발팀을 위한 AI 뉴스레터 기자입니다.\n"
-              "아래 기사 본문을 읽고 헤드라인·요약·왜 중요한지를 쓰세요.\n"
+              "아래 기사 본문을 읽고 헤드라인·요약·왜 중요한지·주제 분류를 쓰세요.\n"
               "'주목된다·기대를 모은다' 같은 기자체 표현은 쓰지 마세요.")
 
 def extract_body(url):
@@ -200,18 +214,22 @@ def send(run_id, lead, articles, webhook=None, dry_run=True):
     print("발행:", "성공" if ok else f"실패 {r.status_code} {r.text[:120]}")
     return ok
 
-def make_lead(arts):
-    if not arts:
-        return ""
-    srcs = ", ".join(dict.fromkeys(a["source"] for a in arts))
-    return f"오늘은 {len(arts)}건을 골랐습니다. ({srcs})"
+def make_lead(arts, dead=None):
+    if arts:
+        srcs = ", ".join(dict.fromkeys(a["source"] for a in arts))
+        lead = f"오늘은 {len(arts)}건을 골랐습니다. ({srcs})"
+    else:
+        lead = ""
+    if dead:
+        lead += f"\n⚠️ 응답 없음: {', '.join(dead)}"
+    return lead
 
 def publish(s: dict) -> dict:                 # ⑤ 발행 — 마지막 빈 노드
     arts = [{"headline": a["headline"], "summary": a["summary"], "why": a["why"],
-             "url": a["url"], "source": a["source"], "topic": a.get("event", ""),
+             "url": a["url"], "source": a["source"], "topic": a.get("topic", ""),
              "when": a["at"].strftime("%m-%d %H:%M")} for a in s["verified"]]
     today = datetime.now().strftime("%Y-%m-%d")
-    sent  = send(today, make_lead(arts), arts,
+    sent  = send(today, make_lead(arts, s.get("dead")), arts,
                  webhook=os.environ.get("DISCORD_WEBHOOK_URL"),
                  dry_run=os.environ.get("DRY_RUN", "1") == "1")   # 기본은 보내지 않음
     label = f"{len(arts)}건" if arts else "조용합니다"
@@ -230,7 +248,7 @@ def build():
     return g
 
 INIT = {"hours": 24,
-         "collected": [], "picked": [], "drafted": [], "verified": [], "log": []}
+         "collected": [], "dead": [], "picked": [], "drafted": [], "verified": [], "log": []}
 
 
 def run():                                     # 돌리고, 한 줄 남긴다
