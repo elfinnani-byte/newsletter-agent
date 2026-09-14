@@ -131,12 +131,26 @@ def extract_body(url):
     d = trafilatura.fetch_url(url)
     return trafilatura.extract(d) if d else None
 
+def has_korean(text):
+    return bool(re.search(r'[가-힣]', text))
+
 def draft(body):
-    return client.chat.completions.parse(
+    d = client.chat.completions.parse(
         model="gpt-4.1-mini", temperature=0,
         messages=[{"role": "system", "content": REPORT_SYS},
                   {"role": "user", "content": body[:6000]}],
         response_format=Draft).choices[0].message.parsed
+    retried = False
+    if not (has_korean(d.headline) and has_korean(d.summary)):
+        retried = True
+        d = client.chat.completions.parse(
+            model="gpt-4.1-mini", temperature=0,
+            messages=[{"role": "system", "content": REPORT_SYS},
+                      {"role": "user", "content": body[:6000]},
+                      {"role": "assistant", "content": d.model_dump_json()},
+                      {"role": "user", "content": "headline과 summary가 한국어가 아닙니다. 반드시 한국어로 다시 쓰세요."}],
+            response_format=Draft).choices[0].message.parsed
+    return d, retried
 
 def fan_report(s: dict):                      # 기사 수만큼 워커를 펼친다
     return [Send("report", {"item": it}) for it in s["picked"]]
@@ -147,9 +161,10 @@ def report(s: dict) -> dict:                   # ③ 요약 — 기사 한 건�
     if not body or len(body) < 600:            # 4강에서 정한 G1 기준선
         return {"drafted": [],
                 "log": [f"   취재 제외 {it['source']} · 본문 {len(body or '')}자"]}
-    d = draft(body)
+    d, retried = draft(body)
     return {"drafted": [{**it, "body": body[:6000], **d.model_dump()}],
-            "log": [f"   취재 완료 {it['source']} · {d.headline[:20]}"]}
+            "log": [f"   취재 완료 {it['source']} · {d.headline[:20]}"
+                    + (" · 한국어 재요청" if retried else "")]}
 
 class Verdict(BaseModel):
     ok:       bool      = Field(description="요약이 원문에 근거하면 true")
